@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通网课作业助手（AI 搜题版）
 // @namespace    local.chaoxing.ai-assistant
-// @version      4.7.13
+// @version      4.7.14
 // @author       bzm
 // @description  使用自定义 OpenAI 兼容接口搜题，支持学习通视频、作业和测验等页面。
 // @match        *://*.chaoxing.com/*
@@ -73,6 +73,7 @@ var setting = {
     // ========== 视频模拟配置 ==========
     videoMode: 'simulate',  // 'simulate'=模拟上报, 'normal'=正常播放
     reportInterval: 50,     // 上报间隔(秒)
+    backgroundPlay: false,  // 页面隐藏时允许原生播放器继续播放
     showProgressBar: 1      // 显示可视化进度条
 }
 /**************************************************************************************************/
@@ -1281,10 +1282,11 @@ function normalVideoPlay(dom, task) {
     var foregroundMs = 0;
     var idleSince = 0;
     var lastTick = Date.now();
-    var wasActive = isMediaPageActive();
+    var wasActive = isMediaPageActive() || setting.backgroundPlay;
     var page = mediaPageDocument();
     var pageWindow = page.defaultView;
     var hadPrompt = false;
+    var backgroundStalled = false;
     isVideoTaskActive = true;
 
     function hasFinishedTask() {
@@ -1384,7 +1386,7 @@ function normalVideoPlay(dom, task) {
                 current.manualPause = true;
                 current.resumeOnFocus = false;
                 current.lastActivePlaying = false;
-            } else if (!isMediaPageActive()) {
+            } else if (!isMediaPageActive() && !setting.backgroundPlay) {
                 current.resumeOnFocus = true;
             } else if (!current.resumeOnFocus) {
                 current.resumeAt = foregroundMs + 1000;
@@ -1473,7 +1475,7 @@ function normalVideoPlay(dom, task) {
     }
 
     function rememberPlayingBeforeFocusLoss() {
-        if (!isMediaPageActive() && binding?.lastActivePlaying && !binding.manualPause && !binding.media.ended) {
+        if (!setting.backgroundPlay && !isMediaPageActive() && binding?.lastActivePlaying && !binding.manualPause && !binding.media.ended) {
             binding.resumeOnFocus = true;
         }
     }
@@ -1481,13 +1483,24 @@ function normalVideoPlay(dom, task) {
     function tick() {
         if (!isCurrentTask(task)) return;
         var now = Date.now();
-        var active = isMediaPageActive();
+        var visible = isMediaPageActive();
+        var active = visible || setting.backgroundPlay;
         if (active && wasActive) foregroundMs += Math.max(0, Math.min(now - lastTick, 1000));
         lastTick = now;
         wasActive = active;
         if (!active) {
             rememberPlayingBeforeFocusLoss();
             return;
+        }
+        if (backgroundStalled) {
+            if (!visible) return;
+            backgroundStalled = false;
+            idleSince = foregroundMs;
+            if (binding?.media.paused && !binding.manualPause) {
+                binding.resumeOnFocus = true;
+                binding.rejected = null;
+                binding.resumeAttempts = 0;
+            }
         }
 
         var media = findTaskMedia(dom, binding?.media, preferAudio);
@@ -1546,7 +1559,7 @@ function normalVideoPlay(dom, task) {
                 manualOnly = false;
                 autoAttempts = 0;
                 nextAttempt = idleSince = foregroundMs;
-                log('▶️ 前台播放器意外暂停，尝试恢复播放：' + name, 'blue');
+                log('▶️ ' + (visible ? '播放器意外暂停' : '后台播放器暂停') + '，尝试恢复播放：' + name, 'blue');
             }
             if (media.error && !binding.pending) logFailure(binding, 'MediaError');
             if (setting.showProgressBar && !currentProgressBar && Number.isFinite(media.duration) && media.duration > 0) {
@@ -1557,18 +1570,31 @@ function normalVideoPlay(dom, task) {
             attemptPlay(binding);
         }
         var idle = foregroundMs - idleSince;
-        if (idle >= 60000) {
-            skipCurrentTask(media ? '页面在前台累计 60 秒未检测到播放进度' : '页面在前台累计 60 秒未找到播放器');
+        if (!visible && media?.paused && !binding.manualPause &&
+            (binding.rejected?.name === 'NotAllowedError' || idle >= 15000)) {
+            backgroundStalled = true;
+            log('⏸️ 后台播放未能继续，回到课程页后重试：' + name, 'orange');
+        } else if (idle >= 60000) {
+            if (!visible) {
+                backgroundStalled = true;
+                log('⏸️ 后台未检测到播放进度，等待回到课程页：' + name, 'orange');
+                return;
+            }
+            skipCurrentTask(media ? '页面累计 60 秒未检测到播放进度' : '页面累计 60 秒未找到播放器');
         } else if (idle >= 2000 && !manualNotice && (!media || (media.paused && !binding.pending))) {
             manualNotice = true;
             if (!failureLogged) log('ℹ️ 请在前台点击播放器的播放按钮：' + name, 'blue');
         }
     }
 
-    page.addEventListener?.('visibilitychange', rememberPlayingBeforeFocusLoss);
+    function handleVisibilityChange() {
+        rememberPlayingBeforeFocusLoss();
+        if (setting.backgroundPlay || isMediaPageActive()) tick();
+    }
+    page.addEventListener?.('visibilitychange', handleVisibilityChange);
     pageWindow?.addEventListener('blur', rememberPlayingBeforeFocusLoss);
     currentMediaCleanup = function() {
-        page.removeEventListener?.('visibilitychange', rememberPlayingBeforeFocusLoss);
+        page.removeEventListener?.('visibilitychange', handleVisibilityChange);
         pageWindow?.removeEventListener('blur', rememberPlayingBeforeFocusLoss);
         releaseMedia();
     };
@@ -3342,7 +3368,8 @@ function showBox() {
                         '<span>▶️ 正常播放</span>' +
                     '</label>' +
                 '</div>' +
-                '<div style="font-size:12px;color:#666;margin-top:8px;">模拟上报：使用Web Worker后台计时，最小化/切换标签页不影响上报</div>' +
+                '<div style="margin-top:8px;"><label><input id="backgroundPlayCheck" type="checkbox" style="appearance:auto;position:static;opacity:1;width:16px;height:16px;vertical-align:middle;"> 后台播放（原生播放器）</label></div>' +
+                '<div style="font-size:12px;color:#666;margin-top:4px;">切换标签后尝试续播。课程或浏览器限制时，回到课程页可恢复。</div>' +
             '</div>' +
             '<div style="margin-bottom:15px;padding:10px;background:#fff3e0;border-radius:4px;">' +
                 '<div style="margin-bottom:12px;font-weight:bold;">⚙️ 视频参数</div>' +
@@ -3437,6 +3464,12 @@ function showBox() {
                 log('📹 视频倍速设置为: ' + newRate.toFixed(2) + 'x', 'green');
             });
             
+            $('#backgroundPlayCheck', targetDoc).prop('checked', setting.backgroundPlay).change(function() {
+                setting.backgroundPlay = this.checked;
+                GM_setValue('backgroundPlay', setting.backgroundPlay);
+                log('🎬 后台播放已' + (setting.backgroundPlay ? '开启' : '关闭'), 'blue');
+            });
+
             $('#showProgressBarCheck', targetDoc).change(function() {
                 setting.showProgressBar = this.checked ? 1 : 0;
                 GM_setValue('showProgressBar', setting.showProgressBar);
@@ -3495,7 +3528,7 @@ function showBox() {
                 }
             });
             timeIntervalInput.value = setting.time / 1000;
-            $('#ne-21notice', targetDoc).text('AI 搜题版 v4.7.13 · F9 隐藏或显示');
+            $('#ne-21notice', targetDoc).text('AI 搜题版 v4.7.14 · F9 隐藏或显示');
 
             flushLogs();
             showPikaqiu();
@@ -3688,6 +3721,7 @@ function loadScriptSettings() {
     setting.rate = Number(GM_getValue('videoRate', setting.rate));
     if (!Number.isFinite(setting.rate) || setting.rate < 1 || setting.rate > 16) setting.rate = 1;
     setting.showProgressBar = Boolean(GM_getValue('showProgressBar', setting.showProgressBar));
+    setting.backgroundPlay = GM_getValue('backgroundPlay', false) === true;
 
     quizSettingKeys.forEach(function(key) {
         var stored = GM_getValue('quiz.' + key, null);
@@ -3717,6 +3751,9 @@ function loadScriptSettings() {
                 setting.rate = value;
                 updateMediaRate(value);
             }
+        });
+        GM_addValueChangeListener('backgroundPlay', (_, oldValue, value, remote) => {
+            if (remote) setting.backgroundPlay = value === true;
         });
         GM_addValueChangeListener('showProgressBar', (_, oldValue, value, remote) => {
             if (remote) {
