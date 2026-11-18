@@ -2,7 +2,7 @@
 
 一个通过脚本猫运行的学习通用户脚本。它使用用户配置的 OpenAI 兼容接口处理文字和图文题，并提供课程任务调度、视频与音频播放、章节切换及浮窗设置。
 
-当前源码版本为 **v4.7.14**。入口文件是 `ai刷题.user.js`，保留了原脚本的作者标记。仓库中的脚本可直接安装，不需要构建。
+当前源码版本为 **v4.7.15**。入口文件是 `ai刷题.user.js`，保留了原脚本的作者标记。仓库中的脚本可直接安装，不需要构建。
 
 ## 安装与配置
 
@@ -26,6 +26,7 @@ API Key 应保存在脚本猫的用户配置中。题干、选项和启用后读
 ## 使用行为
 
 - **文字和图文题**：覆盖单选、多选、填空、判断和简答。脚本跳过已经检测为作答的题。模型答案仍需核对。
+- **整卷预览考试**：支持 `/exam-ans/mooc2/exam/preview`，按页面上的 `.questionLi` 逐题读取并处理；跳过已作答和无法得到可靠答案的题。扫描结束后停留在当前页面，不自动交卷。原逐题考试页仍走 `missonExam`。
 - **答题间隔**：浮窗输入秒数，范围 **0.5–60 秒**。点「保存」或按回车，下一次安排答题计时使用新值。这个间隔叠加在 AI 请求耗时之后。
 - **测验提交**：普通自动提交默认关闭。启用后会检查答题状态，提交后等待页面确认。强制提交是独立开关，默认关闭。单独打开的作业页目前走填题流程。
 - **课程任务**：依次处理本节附件。知识图谱、图片及不支持的任务会记入跳过计数，队列继续处理后续任务。队列结束后会尝试进入下一节，并识别学习通特定的「还有任务点未完成」跳转提示。
@@ -39,12 +40,12 @@ API Key 应保存在脚本猫的用户配置中。题干、选项和启用后读
 
 | 模块 | 关键函数 | 修改时关注 |
 | --- | --- | --- |
-| 页面启动与路由 | `loadScriptSettings`、`matchRoute`、`handleKnowledgeCards`、`handleHomework`、`handleExam` | 顶层页面与章节 iframe 都可能运行脚本。新增路由时核对匹配范围、浮窗创建时机和异步回调是否属于当前页面。 |
+| 页面启动与路由 | `loadScriptSettings`、`matchRoute`、`handleKnowledgeCards`、`handleHomework`、`handleExam`、`handleExamPreview` | 顶层页面与章节 iframe 都可能运行脚本。新增路由时核对匹配范围、浮窗创建时机和异步回调是否属于当前页面。 |
 | 任务队列 | `getTaskParams`、`missionStart`、`advanceTask`、`toNext` | `_mlist` 与 `_domList` 必须按相同索引增减。任务完成和跳过分别计数。异步回调使用 `isCurrentTask` 或 `scheduleOnPage` 避免旧章节回调影响新章节。 |
 | 音视频 | `missionVideo`、`normalVideoPlay`、`findTaskMedia`、`updateMediaRate`、`forceCleanupAll` | 区分媒体节点、平台任务标记和面板状态。结束、切页或跳过时释放 Worker、请求、计时器及监听器。 |
 | AI 请求 | `getAIConfig`、`getAnswer`、`requestAIAnswer`、`parseAIAnswer` | 请求使用非流式 Chat Completions，从 `choices[0].message.content` 取最终答案。缺失、截断或格式无效的结果会跳过，接口异常走调用方的错误处理。 |
 | 图片输入 | `getQuestionImages`、`loadQuestionImage`、`requestQuestionImage`、`makeVisionContent` | 图片必须跟随所属题干或编号选项。优先读取懒加载属性，校验域名、大小和文件签名。针对学习通图片 CDN 传页面来源并校验最终跳转来源。 |
-| 页面填题 | `startDoPhoneTimu`、`startDoWork`、`doHomeWork`、`missonExam` | 移动测验、PC 测验、作业和考试各有页面选择器。改通用答案结构时核对这四个入口。 |
+| 页面填题 | `startDoPhoneTimu`、`startDoWork`、`doHomeWork`、`missonExam`、`missionExamPreview`、`processExamPreview` | 移动测验、PC 测验、作业、逐题考试和整卷预览各有页面选择器。整卷预览从题干剔除题号操作区，选项按所在题容器读取，异步处理只作用于仍连接的当前页面。 |
 | 编辑器与提交 | `getBlankInputCount`、`fillBlankAnswer`、`fillShortAnswer`、`finishQuiz` | 填空数量要与实际输入框对应。富文本写入经过 HTML 转义。点击提交和确认平台状态是两个阶段。 |
 | 浮窗与偏好 | `showBox`、`loadScriptSettings`、`applyQuizSetting`、`setChaoxingHelperHidden` | 浏览器输入单位是秒，内部计时单位是毫秒。用 GM 储存同步 iframe 与标签页设置。 |
 | 字体与依赖 | `decryptFont`、`decryptFontInIframe`、元数据 `@require` / `@resource` | 当前使用 jQuery、MD5、TyprMd5 和字符映射资源。移动元数据或替换依赖后同时检查字体解码和浏览器启动。 |
@@ -95,6 +96,7 @@ node --check ai刷题.user.js
 | 场景 | 验证点 |
 | --- | --- |
 | 文字题和图片题 | 菜单的文字与识图测试通过。实际作业分别验证文字题、题干含图、选项含图，以及混合图文题。 |
+| 整卷预览考试 | 确认识别题目总数、已作答题不重复点选、图片题进入识图、无可靠答案继续下一题，刷新后答案仍在；不得自动点击「交卷」。 |
 | 图片下载失败 | 可定位到来源、HTTP 状态或格式问题。学习通 CDN 的同源跳转可完成，异常跳转和超限图片会停止当前题的请求。 |
 | 答题间隔 | 例如保存 2 秒后刷新确认保留。再试 0.5 秒、60 秒和非法输入。 |
 | 任务跳过与切章 | 跳过最后一个不支持的任务后能进入下一节。有确认弹窗时只操作目标弹窗的「下一节」。 |
@@ -111,6 +113,12 @@ node --check ai刷题.user.js
 | 文字题正常、图文题被跳过 | 检查图片开关、视觉模型、图片读取日志和大小限制。若出现新的图片域名，先核实归属和重定向路径。 |
 | 调大间隔仍在继续当前题 | 新值在下一次排程时读取，已经发出的 AI 请求和已安排的计时会按原流程结束。 |
 | 高倍速回到 1× | 查看浮窗「当前实际速度」和原生播放器显示。课程播放器可能重设速度，任务完成状态由学习通确认。 |
+| 整卷预览检测不到题目 | 核对路径是否为 `/exam-ans/mooc2/exam/preview`，以及 `.mark_table .whiteDiv .questionLi` 是否已经渲染；旧版只适配 `/exam/test/reVersionTestStartNew`。 |
+
+### v4.7.15
+
+- 新增整卷预览考试路由与逐题处理。真实 Edge 页面检测到 20 道单选题，其中 4 道题干含图；已作答题被跳过，未作答题继续处理，扫描结束没有自动交卷。
+- 刷新后此前填入的答案仍在；一题始终没有可靠的 AI 答案，脚本将其跳过并保留页面供人工核对。自动选择只表示页面控件已选中，答案正确性仍由用户核对。
 
 ### v4.7.14
 

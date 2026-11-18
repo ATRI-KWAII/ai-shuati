@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通网课作业助手（AI 搜题版）
 // @namespace    local.chaoxing.ai-assistant
-// @version      4.7.14
+// @version      4.7.15
 // @author       bzm
 // @description  使用自定义 OpenAI 兼容接口搜题，支持学习通视频、作业和测验等页面。
 // @match        *://*.chaoxing.com/*
@@ -2983,6 +2983,109 @@ function doHomeWork(index, TiMuList) {
 }
 
 // ========== 考试处理 ==========
+function missionExamPreview() {
+    if (!checkAIConfigBeforeAction('整卷预览自动答题')) return;
+    var questions = $('.mark_table .whiteDiv .questionLi').get();
+    if (!questions.length) {
+        log('⚠️ 整卷预览页未找到题目。', 'orange');
+        return;
+    }
+    log('📝 整卷预览共检测到 ' + questions.length + ' 道题，逐题处理；不会自动交卷。', 'green');
+    processExamPreview(0, questions, _l.href);
+}
+
+function processExamPreview(index, questions, pageUrl) {
+    if (pageUrl !== _l.href) return;
+    if (index >= questions.length) {
+        log('📋 整卷预览题目已检查完毕，请核对答案；脚本不会自动交卷。', 'blue');
+        return;
+    }
+    var element = questions[index];
+    if (!element?.isConnected) return;
+    var $question = $(element);
+    var $title = $question.find('h3.mark_name').first();
+    var $answer = $question.find('.stem_answer').first();
+    var typeLabel = $title.find('.colorShallow').first().text();
+    var typeName = typeLabel.match(/单选题|多选题|填空题|判断题|简答题/)?.[0];
+    var typeMap = { '单选题': 0, '多选题': 1, '填空题': 2, '判断题': 3, '简答题': 4 };
+    var type = typeMap[typeName];
+    var $options = $answer.find('.clearfix.answerBg .fl.answer_p');
+    if (type === undefined && $options.length) {
+        type = $answer.find('input[type="checkbox"]').length ? 1 : 0;
+    }
+    var next = function(delay) {
+        scheduleOnPage(() => processExamPreview(index + 1, questions, pageUrl), delay);
+    };
+    if (type === undefined || !$title.length || !$answer.length) {
+        log('⚠️ 整卷第 ' + (index + 1) + ' 题结构暂不支持，跳过。', 'orange');
+        next(30);
+        return;
+    }
+    var inputs = $answer.find('textarea, input[type="text"]').get();
+    var alreadyAnswered = type <= 1 || type === 3 ?
+        $answer.find('.clearfix.answerBg').get().some(optionIsSelected) :
+        inputs.some(input => input.value.trim());
+    if (alreadyAnswered) {
+        log('📌 整卷第 ' + (index + 1) + ' 题已作答，跳过。', 'green');
+        next(30);
+        return;
+    }
+
+    // 题号、题型和标记按钮属于页面操作区，不应混入 AI 题干。
+    var stem = $title[0].cloneNode(true);
+    stem.querySelectorAll('.qnoRow, .asFlagBtn').forEach(node => node.remove());
+    var questionText = tidyQuestion(stem.innerHTML) || '';
+    var optionsData = [];
+    if (type <= 1) {
+        optionsData = $options.get().map(option => tidyStr(option.innerHTML) || '');
+    } else if (type === 2) {
+        optionsData = [String(getBlankInputCount($answer))];
+    } else if (type === 3) {
+        optionsData = ['对', '错'];
+    } else {
+        optionsData = ['1'];
+    }
+    getAnswer(type, questionText, optionsData, { stem: stem, options: $options }).then(answer => {
+        if (pageUrl !== _l.href || !element.isConnected) return;
+        if (answer === null) {
+            log('⚠️ 整卷第 ' + (index + 1) + ' 题无可靠答案，跳过。', 'orange');
+            next(setting.time);
+            return;
+        }
+        showAIAnswer($title, type, answer);
+        var filled = true;
+        if (type <= 1) {
+            if (setting.goodStudent) {
+                answer.forEach(i => $options.eq(i).parent().find('span').css('font-weight', 'bold'));
+            } else {
+                answer.forEach(i => {
+                    var option = $options.eq(i).parent()[0];
+                    if (!option?.isConnected) { filled = false; return; }
+                    if (!optionIsSelected(option)) option.click();
+                    if (!optionIsSelected(option)) filled = false;
+                });
+            }
+        } else if (type === 3) {
+            filled = handleExamJudge($answer, answer, setting.goodStudent);
+        } else if (!setting.goodStudent && type === 2) {
+            filled = fillBlankAnswer($answer, answer, false, null);
+        } else if (!setting.goodStudent && type === 4) {
+            filled = fillShortAnswer($answer, answer, false, null);
+        }
+        if (!filled) log('⚠️ 整卷第 ' + (index + 1) + ' 题未确认填入，请核对。', 'orange');
+        else log('✅ 整卷第 ' + (index + 1) + ' 题已处理。', 'green');
+        next(setting.time);
+    }).catch(err => {
+        if (pageUrl !== _l.href || !element.isConnected) return;
+        if (err === 'AI_REQUEST_FAILED') {
+            log('❌ AI 接口请求失败，整卷答题已停止。', 'red');
+            return;
+        }
+        log('⚠️ 整卷第 ' + (index + 1) + ' 题处理失败，跳过。', 'orange');
+        next(setting.time);
+    });
+}
+
 function missonExam() {
     if (!checkAIConfigBeforeAction('考试自动答题')) return;
     
@@ -3528,7 +3631,7 @@ function showBox() {
                 }
             });
             timeIntervalInput.value = setting.time / 1000;
-            $('#ne-21notice', targetDoc).text('AI 搜题版 v4.7.14 · F9 隐藏或显示');
+            $('#ne-21notice', targetDoc).text('AI 搜题版 v4.7.15 · F9 隐藏或显示');
 
             flushLogs();
             showPikaqiu();
@@ -3631,6 +3734,15 @@ function handleExam() {
     });
 }
 
+function handleExamPreview() {
+    var url = _l.href;
+    waitForElement('.mark_table .whiteDiv .questionLi h3.mark_name').then(() => {
+        if (url === _l.href) missionExamPreview();
+    }).catch(() => {
+        if (url === _l.href) log('⚠️ 整卷预览页未找到题目。', 'orange');
+    });
+}
+
 function handleHomework() {
     var url = _l.href;
     waitForElement('.mark_table form .questionLi').then(() => {
@@ -3671,6 +3783,12 @@ var routes = [
         handler: handleKnowledgeCards,
         needBox: true,
         desc: '知识点/任务页面'
+    },
+    {
+        pattern: /\/exam-ans\/mooc2\/exam\/preview(?:[?#]|$)/,
+        handler: handleExamPreview,
+        needBox: true,
+        desc: '整卷预览考试页'
     },
     {
         pattern: /\/exam\/test\/reVersionTestStartNew/,
